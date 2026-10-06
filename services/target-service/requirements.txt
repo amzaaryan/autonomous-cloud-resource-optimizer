@@ -1,0 +1,4 @@
+# Target service dependencies
+fastapi
+uvicorn[standard]
+prometheus-client

@@ -1,0 +1,18 @@
+# Python dependencies for local development and runtime services
+fastapi
+uvicorn[standard]
+prometheus-client
+pandas
+numpy
+scikit-learn
+prometheus-api-client
+requests
+docker
+streamlit
+plotly
+locust
+python-dotenv
+joblib
+pytest
+pytest-asyncio
+httpx

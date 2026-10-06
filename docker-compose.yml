@@ -1,0 +1,91 @@
+services:
+  target-service:
+    build: ./services/target-service
+    container_name: target-service
+    environment:
+      SERVICE_NAME: target-service
+    ports:
+      - "8000:8000"
+    networks:
+      - optimizer-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - optimizer-network
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - optimizer-network
+
+  optimizer:
+    build:
+      context: .
+      dockerfile: optimizer/Dockerfile
+    container_name: optimizer
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - prometheus
+      - target-service
+    networks:
+      - optimizer-network
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: optimizer-dashboard
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      - prometheus
+    networks:
+      - optimizer-network
+
+  locust:
+    image: locustio/locust:latest
+    container_name: locust
+    working_dir: /mnt/locust
+    volumes:
+      - ./load_testing:/mnt/locust:ro
+    command: -f /mnt/locust/locustfile.py --host=http://target-service:8000
+    ports:
+      - "8089:8089"
+    depends_on:
+      - target-service
+    networks:
+      - optimizer-network
+
+volumes:
+  prometheus-data:
+
+networks:
+  optimizer-network:
+    driver: bridge
