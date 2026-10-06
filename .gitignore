@@ -11,6 +11,7 @@ htmlcov/
 # Generated data and models
 /data/raw/*
 /data/processed/*
+/data/runtime/*
 /data/models/*
 !/data/**/.gitkeep
 

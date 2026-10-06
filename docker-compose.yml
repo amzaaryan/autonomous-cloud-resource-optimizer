@@ -4,13 +4,21 @@ services:
     container_name: target-service
     environment:
       SERVICE_NAME: target-service
+      WORK_INTENSITY_LOW_ITERATIONS: ${WORK_INTENSITY_LOW_ITERATIONS:-50000}
+      WORK_INTENSITY_MEDIUM_ITERATIONS: ${WORK_INTENSITY_MEDIUM_ITERATIONS:-250000}
+      WORK_INTENSITY_HIGH_ITERATIONS: ${WORK_INTENSITY_HIGH_ITERATIONS:-1000000}
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     container_name: prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -20,11 +28,16 @@ services:
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: cadvisor
     privileged: true
     volumes:
@@ -34,6 +47,11 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
@@ -42,14 +60,45 @@ services:
       context: .
       dockerfile: optimizer/Dockerfile
     container_name: optimizer
-    env_file:
-      - .env
+    environment:
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+      OPTIMIZER_HOST: 0.0.0.0
+      OPTIMIZER_PORT: 8001
+      TARGET_SERVICE_NAME: ${TARGET_SERVICE_NAME:-target-service}
+      TARGET_SERVICE_PORT: ${TARGET_SERVICE_PORT:-8000}
+      MIN_REPLICAS: ${MIN_REPLICAS:-1}
+      MAX_REPLICAS: ${MAX_REPLICAS:-5}
+      SCALE_STEP: ${SCALE_STEP:-1}
+      COOLDOWN_SECONDS: ${COOLDOWN_SECONDS:-60}
+      CPU_SCALE_UP_THRESHOLD: ${CPU_SCALE_UP_THRESHOLD:-0.70}
+      CPU_SCALE_DOWN_THRESHOLD: ${CPU_SCALE_DOWN_THRESHOLD:-0.35}
+      MEMORY_SCALE_UP_THRESHOLD: ${MEMORY_SCALE_UP_THRESHOLD:-0.75}
+      LATENCY_SLA_MS: ${LATENCY_SLA_MS:-500}
+      ERROR_RATE_SLA: ${ERROR_RATE_SLA:-0.05}
+      TELEMETRY_INTERVAL_SECONDS: ${TELEMETRY_INTERVAL_SECONDS:-15}
+      FORECAST_HORIZONS_MINUTES: ${FORECAST_HORIZONS_MINUTES:-1,3,5}
+      DRY_RUN: ${DRY_RUN:-true}
+      SCALING_MODE: ${SCALING_MODE:-compose}
+      MODEL_DIR: ${MODEL_DIR:-data/models}
+      TELEMETRY_PATH: ${TELEMETRY_PATH:-data/runtime/telemetry_snapshots.jsonl}
+      SCALING_EVENTS_PATH: ${SCALING_EVENTS_PATH:-data/runtime/scaling_events.jsonl}
+      COST_PER_REPLICA_MINUTE: ${COST_PER_REPLICA_MINUTE:-0.0035}
+      SAVINGS_BASELINE_REPLICAS: ${SAVINGS_BASELINE_REPLICAS:-3}
+    ports:
+      - "8001:8001"
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - prometheus
-      - target-service
+      prometheus:
+        condition: service_healthy
+      target-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
@@ -58,28 +107,43 @@ services:
       context: .
       dockerfile: dashboard/Dockerfile
     container_name: optimizer-dashboard
-    env_file:
-      - .env
+    environment:
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
     ports:
       - "8501:8501"
     volumes:
       - ./data:/app/data:ro
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
   locust:
-    image: locustio/locust:latest
+    image: locustio/locust:2.31.8
     container_name: locust
     working_dir: /mnt/locust
+    environment:
+      LOCUST_PROFILE: ${LOCUST_PROFILE:-constant}
+      LOCUST_WORK_INTENSITY: ${LOCUST_WORK_INTENSITY:-medium}
     volumes:
       - ./load_testing:/mnt/locust:ro
     command: -f /mnt/locust/locustfile.py --host=http://target-service:8000
     ports:
       - "8089:8089"
     depends_on:
-      - target-service
+      target-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8089', timeout=2)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     networks:
       - optimizer-network
 
