@@ -38,6 +38,8 @@ POLICY_STATE = Gauge("optimizer_policy_state", "1 predictive, 0 reactive")
 ESTIMATED_COST = Gauge("optimizer_estimated_cost_total", "Estimated cumulative cost")
 ESTIMATED_SAVINGS = Gauge("optimizer_estimated_savings_total", "Estimated cumulative savings")
 CURRENT_REPLICAS = Gauge("optimizer_current_replicas", "Current known replica count")
+RESOURCE_CPU = Gauge("optimizer_target_cpu_usage", "Aggregate target-service CPU usage ratio")
+RESOURCE_MEMORY = Gauge("optimizer_target_memory_usage", "Aggregate target-service memory usage ratio")
 
 
 class RuntimeStatus:
@@ -220,6 +222,15 @@ def main() -> None:
                     replicas = scaler.get_replica_count()
                     data["replica_count"] = replicas
                 CURRENT_REPLICAS.set(float(replicas))
+                cpu_usage, memory_usage = scaler.get_resource_usage()
+                if data.get("cpu_usage") is None:
+                    data["cpu_usage"] = cpu_usage
+                if data.get("memory_usage") is None:
+                    data["memory_usage"] = memory_usage
+                if data.get("cpu_usage") is not None:
+                    RESOURCE_CPU.set(float(data["cpu_usage"]))
+                if data.get("memory_usage") is not None:
+                    RESOURCE_MEMORY.set(float(data["memory_usage"]))
 
                 forecasts, confidence = forecaster.forecast(list(history) + [data])
                 for horizon, value in forecasts.items():

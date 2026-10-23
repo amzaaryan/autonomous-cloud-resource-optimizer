@@ -47,8 +47,8 @@ def prom_query(promql: str) -> float | None:
 
 def get_live_metrics() -> dict[str, float | None]:
     return {
-        "cpu_usage": prom_query('sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="target-service"}[1m]))'),
-        "memory_usage": prom_query('sum(container_memory_usage_bytes{container_label_com_docker_compose_service="target-service"}) / clamp_min(sum(container_spec_memory_limit_bytes{container_label_com_docker_compose_service="target-service"}), 1)'),
+        "cpu_usage": prom_query('optimizer_target_cpu_usage') or prom_query('sum(rate(container_cpu_usage_seconds_total{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}[1m]))'),
+        "memory_usage": prom_query('optimizer_target_memory_usage') or prom_query('sum(container_memory_usage_bytes{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}) / scalar(sum(machine_memory_bytes))'),
         "request_rate": prom_query('sum(rate(http_requests_total{path="/work"}[1m]))'),
         "p95_latency_ms": prom_query('histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{path="/work"}[5m]))) * 1000'),
         "error_rate": prom_query('sum(rate(http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1)'),
@@ -98,8 +98,8 @@ events = load_events(EVENTS_PATH)
 
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 col1.metric("Replicas", "--" if live["replica_count"] is None else f"{live['replica_count']:.0f}")
-col2.metric("CPU", "--" if live["cpu_usage"] is None else f"{live['cpu_usage']:.3f}")
-col3.metric("Memory", "--" if live["memory_usage"] is None else f"{live['memory_usage']:.3f}")
+col2.metric("CPU", "--" if live["cpu_usage"] is None else f"{live['cpu_usage'] * 100:.1f}%")
+col3.metric("Memory", "--" if live["memory_usage"] is None else f"{live['memory_usage'] * 100:.1f}%")
 col4.metric("RPS", "--" if live["request_rate"] is None else f"{live['request_rate']:.3f}")
 col5.metric("p95 latency", "--" if live["p95_latency_ms"] is None else f"{live['p95_latency_ms']:.1f} ms")
 col6.metric("Error rate", "--" if live["error_rate"] is None else f"{live['error_rate']:.3f}")
@@ -109,7 +109,7 @@ if telemetry.empty:
 else:
     telemetry = telemetry.tail(500).copy()
     if "timestamp" in telemetry:
-        telemetry["timestamp"] = pd.to_datetime(telemetry["timestamp"], errors="coerce")
+        telemetry["timestamp"] = pd.to_datetime(telemetry["timestamp"], utc=True, errors="coerce")
 
     st.subheader("Historical telemetry")
     available_metrics = [
@@ -119,21 +119,21 @@ else:
     ]
     if available_metrics and "timestamp" in telemetry:
         long_df = telemetry.melt(id_vars=["timestamp"], value_vars=available_metrics, var_name="metric", value_name="value")
-        st.plotly_chart(px.line(long_df, x="timestamp", y="value", color="metric"), use_container_width=True)
+        st.plotly_chart(px.line(long_df, x="timestamp", y="value", color="metric"), width="stretch")
 
     st.subheader("Forecasts")
     forecast_df = parse_forecasts(telemetry)
     if forecast_df.empty:
         st.info("Forecast output will appear after optimizer inference runs.")
     else:
-        forecast_df["timestamp"] = pd.to_datetime(forecast_df["timestamp"], errors="coerce")
-        st.plotly_chart(px.line(forecast_df, x="timestamp", y="forecast_rps", color="horizon"), use_container_width=True)
+        forecast_df["timestamp"] = pd.to_datetime(forecast_df["timestamp"], utc=True, errors="coerce")
+        st.plotly_chart(px.line(forecast_df, x="timestamp", y="forecast_rps", color="horizon"), width="stretch")
 
 st.subheader("Scaling events")
 if events.empty:
     st.info("No scaling events logged yet.")
 else:
-    st.dataframe(events, use_container_width=True)
+    st.dataframe(events, width="stretch")
 
 st.subheader("Policy state and optimizer health")
 status_col1, status_col2 = st.columns(2)
@@ -161,7 +161,7 @@ st.subheader("Reactive vs predictive comparison")
 comparison_path = Path("data/processed/model_evaluation.csv")
 if comparison_path.exists():
     comparison = pd.read_csv(comparison_path)
-    st.dataframe(comparison, use_container_width=True)
+    st.dataframe(comparison, width="stretch")
 else:
     st.info("Run model training to generate predictive evaluation comparison (data/processed/model_evaluation.csv).")
 
