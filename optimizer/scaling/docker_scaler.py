@@ -47,6 +47,30 @@ class DockerScaler:
         replicas = mode.get("Replicas")
         return int(replicas) if replicas is not None else 1
 
+    def get_resource_usage(self) -> tuple[float | None, float | None]:
+        """Return aggregate CPU ratio and memory ratio for running Compose containers."""
+        if self.client is None:
+            return None, None
+        containers = self.client.containers.list(filters={"label": f"com.docker.compose.service={self.service_name}", "status": "running"})
+        cpu_total = 0.0
+        memory_used = 0
+        memory_limit = 0
+        for container in containers:
+            try:
+                stats = container.stats(stream=False)
+                cpu = stats.get("cpu_stats", {})
+                previous = stats.get("precpu_stats", {})
+                cpu_delta = cpu.get("cpu_usage", {}).get("total_usage", 0) - previous.get("cpu_usage", {}).get("total_usage", 0)
+                system_delta = cpu.get("system_cpu_usage", 0) - previous.get("system_cpu_usage", 0)
+                online_cpus = cpu.get("online_cpus") or len(cpu.get("cpu_usage", {}).get("percpu_usage", []) or []) or 1
+                if system_delta > 0 and cpu_delta >= 0:
+                    cpu_total += (cpu_delta / system_delta) * online_cpus
+                memory = stats.get("memory_stats", {})
+                memory_used += int(memory.get("usage", 0))
+                memory_limit += int(memory.get("limit", 0))
+            except (DockerException, KeyError, TypeError, ValueError):
+                LOGGER.exception("Failed reading resource stats for %s", container.name)
+        return cpu_total, (memory_used / memory_limit if memory_limit else None)
     def get_replica_count(self) -> int:
         if self.mode == "swarm":
             return self._swarm_replica_count()

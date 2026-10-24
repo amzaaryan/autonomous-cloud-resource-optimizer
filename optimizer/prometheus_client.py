@@ -116,20 +116,28 @@ class PrometheusClient:
         return self.parse_instant_value(payload)
 
     def get_cpu_usage(self) -> float | None:
-        promql = (
+        labeled = (
             "sum(rate(container_cpu_usage_seconds_total"
             f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}}[1m]))"
         )
-        return self._safe_query_value(promql)
+        value = self._safe_query_value(labeled)
+        if value is not None:
+            return value
+        fallback = "sum(rate(container_cpu_usage_seconds_total{job=\"cadvisor\",id!=\"/\",id!~\"/docker.*|/system.slice.*|/user.slice.*\"}[1m]))"
+        return self._safe_query_value(fallback)
 
     def get_memory_usage(self) -> float | None:
-        promql = (
+        labeled = (
             "sum(container_memory_usage_bytes"
             f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}})"
             " / clamp_min(sum(container_spec_memory_limit_bytes"
             f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}}), 1)"
         )
-        return self._safe_query_value(promql)
+        value = self._safe_query_value(labeled)
+        if value is not None:
+            return value
+        fallback = "sum(container_memory_usage_bytes{job=\"cadvisor\",id!=\"/\",id!~\"/docker.*|/system.slice.*|/user.slice.*\"}) / scalar(sum(machine_memory_bytes))"
+        return self._safe_query_value(fallback)
 
     def get_request_rate(self) -> float | None:
         promql = 'sum(rate(http_requests_total{path="/work"}[1m]))'
