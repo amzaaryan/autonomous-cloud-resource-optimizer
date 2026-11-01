@@ -63,5 +63,17 @@ class Settings:
     telemetry_path: str = os.getenv("TELEMETRY_PATH", "data/runtime/telemetry_snapshots.jsonl")
     scaling_events_path: str = os.getenv("SCALING_EVENTS_PATH", "data/runtime/scaling_events.jsonl")
 
+    # Demo control file (traffic preset, policy mode) shared with the dashboard and Locust.
+    control_path: str = os.getenv("CONTROL_PATH", "data/runtime/control.json")
+
+    # Background retraining on the telemetry this optimizer collects.
+    auto_train: bool = _get_bool("AUTO_TRAIN", True)
+    auto_train_min_rows: int = int(os.getenv("AUTO_TRAIN_MIN_ROWS", "80"))  # ~20 min at 15 s sampling
+    auto_train_interval_minutes: float = float(os.getenv("AUTO_TRAIN_INTERVAL_MINUTES", "10"))
+    # Deploy a model only if it beats the "rate stays the same" baseline on held-out rows.
+    auto_train_require_improvement: bool = _get_bool("AUTO_TRAIN_REQUIRE_IMPROVEMENT", True)
+    model_status_path: str = os.getenv("MODEL_STATUS_PATH", "data/runtime/model_status.json")
+    model_report_path: str = os.getenv("MODEL_REPORT_PATH", "data/processed/model_evaluation.csv")
+
     cost_per_replica_minute: float = float(os.getenv("COST_PER_REPLICA_MINUTE", "0.0035"))
     savings_baseline_replicas: int = int(os.getenv("SAVINGS_BASELINE_REPLICAS", "3"))

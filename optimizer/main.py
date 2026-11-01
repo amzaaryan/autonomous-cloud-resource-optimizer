@@ -18,8 +18,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from optimizer.analytics import per_replica_cpu, update_cost_totals
 from optimizer.config import Settings
+from optimizer.control import read_control
+from optimizer.forecasting.autotrain import AutoTrainer
 from optimizer.forecasting.engine import ForecastEngine
-from optimizer.policy.combined import combined_decision
+from optimizer.policy.combined import effective_forecast, select_decision
 from optimizer.policy.policies import PolicyConfig, PolicyInput
 from optimizer.prometheus_client import PrometheusClient, PrometheusQueryError, TelemetrySnapshot
 from optimizer.scaling.docker_scaler import DockerScaler
@@ -48,14 +50,24 @@ class RuntimeStatus:
         self.last_loop_at: str | None = None
         self.last_error: str | None = None
         self.policy: str = "reactive"
+        self.policy_mode: str = "auto"
 
-    def update(self, *, loop_at: str | None = None, error: str | None = None, policy: str | None = None) -> None:
+    def update(
+        self,
+        *,
+        loop_at: str | None = None,
+        error: str | None = None,
+        policy: str | None = None,
+        policy_mode: str | None = None,
+    ) -> None:
         with self._lock:
             if loop_at is not None:
                 self.last_loop_at = loop_at
             self.last_error = error
             if policy is not None:
                 self.policy = policy
+            if policy_mode is not None:
+                self.policy_mode = policy_mode
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -64,6 +76,7 @@ class RuntimeStatus:
                 "last_loop_at": self.last_loop_at,
                 "last_error": self.last_error,
                 "policy": self.policy,
+                "policy_mode": self.policy_mode,
             }
 
 
@@ -159,6 +172,20 @@ def main() -> None:
     forecaster = ForecastEngine.from_settings(settings)
     policy_config = build_policy_config(settings)
 
+    if settings.auto_train:
+        AutoTrainer(
+            telemetry_path=settings.telemetry_path,
+            model_dir=settings.model_dir,
+            horizons=settings.forecast_horizons_minutes,
+            interval_seconds=settings.telemetry_interval_seconds,
+            status_path=settings.model_status_path,
+            report_path=settings.model_report_path,
+            min_rows=settings.auto_train_min_rows,
+            retrain_seconds=settings.auto_train_interval_minutes * 60.0,
+            require_improvement=settings.auto_train_require_improvement,
+            engine=forecaster,
+        ).start(stop_event)
+
     history: deque[dict[str, Any]] = deque(maxlen=512)
     last_scaled_at: datetime | None = None
     last_tick = time.time()
@@ -204,7 +231,11 @@ def main() -> None:
                 if memory is not None:
                     RESOURCE_MEMORY.set(float(memory))
 
+                policy_mode = read_control(settings.control_path)["policy_mode"]
                 forecasts, confidence = forecaster.forecast(list(history) + [data])
+                forecasts, confidence, forecast_source = effective_forecast(
+                    policy_mode, forecasts, confidence, data.get("request_rate")
+                )
                 for horizon, value in forecasts.items():
                     FORECAST_GAUGE.labels(horizon_minute=str(horizon)).set(value)
 
@@ -225,6 +256,8 @@ def main() -> None:
                 ESTIMATED_SAVINGS.set(cumulative_savings)
                 data["forecasts"] = forecasts
                 data["forecast_confidence"] = confidence
+                data["forecast_source"] = forecast_source
+                data["policy_mode"] = policy_mode
                 data["estimated_cost_total"] = cumulative_cost
                 data["estimated_savings_total"] = cumulative_savings
                 history.append(data)
@@ -238,7 +271,8 @@ def main() -> None:
                     current_replicas=current_replicas,
                     predicted_request_rate=forecasts,
                 )
-                decision = combined_decision(
+                decision = select_decision(
+                    policy_mode,
                     policy_input,
                     policy_config,
                     now=loop_time,
@@ -249,7 +283,7 @@ def main() -> None:
                     scale_down_utilization=settings.scale_down_utilization,
                 )
                 POLICY_STATE.set(1 if decision.policy == "predictive" else 0)
-                status.update(loop_at=loop_iso, error=None, policy=decision.policy)
+                status.update(loop_at=loop_iso, error=None, policy=decision.policy, policy_mode=policy_mode)
 
                 if decision.action in {"scale_up", "scale_down"} and decision.desired_replicas != current_replicas:
                     scaled = scaler.set_replicas(decision.desired_replicas)
@@ -260,6 +294,8 @@ def main() -> None:
                         "to_replicas": decision.desired_replicas,
                         "reason": decision.reason,
                         "policy": decision.policy,
+                        "policy_mode": policy_mode,
+                        "forecast_source": forecast_source,
                         "dry_run": settings.dry_run,
                         "success": scaled,
                         "forecast_confidence": confidence,

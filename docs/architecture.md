@@ -43,6 +43,22 @@ flowchart LR
 Replicas are not published on host ports. nginx and Prometheus find them through Docker's embedded DNS:
 every replica carries the network alias `target-service`, so the name resolves to one address per replica.
 
+## Demo control plane
+
+```mermaid
+flowchart LR
+    UI[Dashboard buttons] -->|writes| CF[(data/runtime/control.json)]
+    CF -->|traffic preset, intensity| LC[Locust load shape, read every second]
+    CF -->|policy mode: auto / reactive / predictive| OP[Optimizer loop, read every cycle]
+    OP --> TEL[(telemetry_snapshots.jsonl)]
+    TEL --> AT[AutoTrainer thread]
+    AT -->|deploy only if it beats the baseline| MD[(data/models)] -->|hot reload| FE[ForecastEngine]
+    AT --> ST[(model_status.json)] --> UI
+```
+
+`predictive` mode with no usable model forecasts the current rate (confidence 1.0), the benchmark's "rate-based" controller;
+`auto` never fakes confidence and stays reactive until a model is deployed.
+
 ## Control loop (every `TELEMETRY_INTERVAL_SECONDS`, default 15 s)
 
 ```mermaid

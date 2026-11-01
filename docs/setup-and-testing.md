@@ -7,6 +7,29 @@ no Docker, so you can check the code before starting the stack.
 > were run during development. The Docker pieces (real scaling, nginx, Prometheus discovery, cAdvisor)
 > were only tested with mocks. Step 11 is how you verify them on your machine.
 
+## Demo day checklist
+
+The stack needs no manual traffic setup or training any more. On the demo machine:
+
+**The day before (needs internet, ~10 min):**
+1. Install Docker Desktop, clone the repo, `git checkout fix/real-scaling-and-forecasting` (or `main` once merged).
+2. `docker compose --env-file .env.demo up -d --build`, so all images are built and cached.
+3. Open http://localhost:8501, press **Training traffic** and leave it for 30+ minutes (or run the demo script a few times).
+   The "Forecasting model" box turns green when a model is deployed, or amber if the forest did not beat the baseline
+   (then predictive mode keeps working with the rate-based forecast; say so honestly).
+4. Rehearse: **Demo script**, flip **Reactive only** / **Predictive** between runs, watch replicas (`docker ps`) and the events table.
+5. Optional, so a fresh machine starts with a model: `git add -f data/models/*` and commit it.
+
+**On the day:** `docker compose --env-file .env.demo up -d` (or `make demo`), open the dashboard, pick a traffic button.
+Stop with `docker compose down`. Telemetry and models persist in `./data` between runs.
+
+**Suggested 3-minute story:** start Reactive only, press *Spike*: CPU rises first, replicas follow late, p95 breaches.
+Switch to Predictive, press *Spike* again: replicas rise as the rate rises, fewer breaches. Show the decision reasons in the events table
+and the forecast chart. If asked about ML: show the model status box and `docs/benchmark.md` (predictive sizing helps; the forest itself did not beat the baseline on unseen shapes).
+
+> Not verified in the build environment: Docker, Locust `--autostart`, the Streamlit buttons. Rehearse once. If Locust does not start by
+> itself, press **Start** in http://localhost:8089 once; the traffic shape still follows the dashboard.
+
 ## 1. Prerequisites
 
 | Need | Why | Check |
@@ -120,7 +143,8 @@ curl -s localhost:8001/health                  # optimizer: {"status":"ok", ...}
 
 ## 8. Generate load and watch decisions
 
-1. Open http://localhost:8089 and click **Start**. The traffic shape comes from `LOCUST_PROFILE`, not from the form fields.
+1. Open the dashboard (http://localhost:8501) and press a traffic button in **Demo control**. (With `LOCUST_PROFILE=panel`, the default, Locust follows
+   the dashboard. Set `LOCUST_PROFILE=constant|ramp|spike|burst|traffic-drop` to use a fixed profile instead, and press **Start** in http://localhost:8089.)
 2. Watch the optimizer decide:
 
 ```bash
@@ -141,6 +165,12 @@ Switch profile later: edit `.env` (or prefix the variable) and recreate Locust:
 `LOCUST_PROFILE=burst docker compose up -d locust`.
 
 ## 9. Train the forecasting models (activates predictive scaling)
+
+**Automatic:** the optimizer retrains in the background every `AUTO_TRAIN_INTERVAL_MINUTES` (default 10) once it has
+`AUTO_TRAIN_MIN_ROWS` (default 80, about 20 minutes) of continuous telemetry, then hot-reloads the models, no restart needed. Progress
+is in the dashboard's "Forecasting model" box and `data/runtime/model_status.json`. A model is deployed only if it beats the
+current-rate baseline on held-out rows (`AUTO_TRAIN_REQUIRE_IMPROVEMENT=true`). Gaps from restarts are handled (training never spans them).
+Switch off with `AUTO_TRAIN=false`. The manual route below still works for experiments.
 
 Until models exist, forecast confidence is 0.0 and the system is **reactive only**. Let step 8 run for at least
 **30 minutes** (more is better, ideally across two or three profiles), then:

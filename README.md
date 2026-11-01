@@ -9,7 +9,7 @@ Educational prototype for **predictive container scaling** using Docker Compose,
 - Prometheus: `http://localhost:9090`
 - cAdvisor: `http://localhost:8080` (host support dependent)
 - Optimizer health/metrics: `http://localhost:8001/health`, `http://localhost:8001/metrics`
-- Locust UI: `http://localhost:8089`
+- Locust UI: `http://localhost:8089` (traffic is controlled from the dashboard; the UI shows the running load)
 - Dashboard: `http://localhost:8501`
 
 ## How it works
@@ -32,6 +32,24 @@ predictive sizing (`ceil(forecast / (capacity x 70%))`) when a trained model giv
 CPU/memory thresholds otherwise, with cooldown, min/max bounds and SLA-safe scale-down. With `DRY_RUN=false` it
 really starts and removes replicas. Full diagrams: [`docs/architecture.md`](docs/architecture.md).
 
+## Demo mode (one command, everything from the dashboard)
+
+```bash
+docker compose --env-file .env.demo up -d --build     # same as: make demo
+```
+
+Open **http://localhost:8501**. The **Demo control** panel at the top lets you:
+
+- pick the traffic Locust generates: Idle, Low, Medium, High, Ramp, Spike, Burst, Traffic drop, a scripted
+  **Demo script** (quiet, spike, quiet, spike), or **Training traffic**; and the work per request. No env edits, no restarts;
+- switch the scaling policy live: **Reactive only**, **Predictive**, or **Auto**, to compare them on the same traffic;
+- watch the forecasting model: it **retrains itself in the background** on the telemetry the optimizer collects and is hot-reloaded.
+  The panel shows progress ("Collecting telemetry 40/80 rows"), then which horizons were deployed.
+
+A trained model is only deployed if it beats the "rate stays the same" baseline on held-out rows. Until then, **Predictive**
+mode uses a rate-based forecast (next-window rate = current rate), which is the "predictive" controller measured in
+[`docs/benchmark.md`](docs/benchmark.md). Details and a demo-day checklist: [`docs/setup-and-testing.md`](docs/setup-and-testing.md#demo-day-checklist).
+
 ## Quick start
 
 ```bash
@@ -51,6 +69,7 @@ If cAdvisor is unsupported on your host, keep the stack running: the optimizer f
 |---|---|---|
 | Check the code | `make test` | no |
 | Compare reactive vs predictive | `make benchmark` | no (simulation) |
+| Demo for the TA | `make demo` (then use the dashboard panel) | yes |
 | Watch decisions safely | `docker compose up --build` | yes |
 | Real autoscaling | `make demo-live` | yes |
 | Prove replicas get traffic | `make smoke-scale` | yes |
@@ -130,6 +149,8 @@ And scaling events:
   - timestamp, action, from/to replicas, reason, policy, dry_run, success
 
 ## Forecasting workflow
+
+**The optimizer retrains models automatically** (see Demo mode); the manual command below is for experiments.
 
 Train Random Forest models (horizons 1/3/5 **minutes**, converted to rows from the sampling interval).
 The target is the *change* in request rate over the horizon (`--target-mode delta`, default) or the
