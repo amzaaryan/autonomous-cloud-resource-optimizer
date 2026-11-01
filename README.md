@@ -12,14 +12,51 @@ Educational prototype for **predictive container scaling** using Docker Compose,
 - Locust UI: `http://localhost:8089`
 - Dashboard: `http://localhost:8501`
 
+## How it works
+
+```mermaid
+flowchart LR
+    Locust -->|traffic| LB[nginx LB :8000] --> T[target-service replicas]
+    T -. metrics .-> Prom[Prometheus]
+    cAdvisor -. CPU/mem .-> Prom
+    Prom --> Opt[Optimizer loop every 15 s]
+    Opt --> Fc[ForecastEngine 1/3/5 min]
+    Fc --> Pol[combined policy: predictive first, reactive safety net]
+    Pol -->|DRY_RUN=false| Scaler[DockerScaler] -->|clone / remove containers| T
+    Opt -.-> Dash[Streamlit dashboard :8501]
+```
+
+Every 15 seconds the optimizer reads Prometheus (request rate, p95, errors, per-replica CPU, memory), forecasts
+request rate 1/3/5 minutes ahead, and decides how many `target-service` replicas it needs:
+predictive sizing (`ceil(forecast / (capacity x 70%))`) when a trained model gives a confident forecast, reactive
+CPU/memory thresholds otherwise, with cooldown, min/max bounds and SLA-safe scale-down. With `DRY_RUN=false` it
+really starts and removes replicas. Full diagrams: [`docs/architecture.md`](docs/architecture.md).
+
 ## Quick start
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose up --build      # safe mode: decisions are logged, nothing is scaled
 ```
 
-If cAdvisor is unsupported on your host, keep the stack running and continue with app/Prometheus metrics; some container-level metrics may be missing.
+Then open http://localhost:8089 and press **Start** to generate load, and http://localhost:8501 for the dashboard.
+For real scaling use `make demo-live`. **Step-by-step setup, every command explained, and a scenario table:
+[`docs/setup-and-testing.md`](docs/setup-and-testing.md).**
+
+If cAdvisor is unsupported on your host, keep the stack running: the optimizer falls back to `docker stats` for CPU/memory.
+
+## Ways to run it
+
+| Goal | Command | Needs Docker |
+|---|---|---|
+| Check the code | `make test` | no |
+| Compare reactive vs predictive | `make benchmark` | no (simulation) |
+| Watch decisions safely | `docker compose up --build` | yes |
+| Real autoscaling | `make demo-live` | yes |
+| Prove replicas get traffic | `make smoke-scale` | yes |
+| Measure one replica's capacity | `make calibrate` | yes (stack running) |
+| Train the forecaster | `make train` (after 30+ min of telemetry) | no (needs collected data) |
+| Reset everything | `make reset` | yes |
 
 ## Workload generation
 
@@ -75,7 +112,8 @@ Optimizer writes line-delimited JSON snapshots:
 
 - `data/runtime/telemetry_snapshots.jsonl`
   - timestamp
-  - cpu_usage
+  - cpu_cores (aggregate cores used by all replicas)
+  - cpu_usage (per-replica utilisation = cpu_cores / (replicas x REPLICA_CPU_LIMIT_CORES))
   - memory_usage
   - request_rate
   - p95_latency_ms
@@ -143,8 +181,10 @@ make train
 make benchmark
 make calibrate
 make up
-make demo-live   # real scaling
+make demo-live    # real scaling
+make smoke-scale  # verify replicas share traffic
 make down
+make reset        # down + delete Prometheus volume
 ```
 
 ## Testing
@@ -168,14 +208,16 @@ Tests do not require live Prometheus or Docker daemon.
 
 - Prometheus unavailable: optimizer stays degraded and retries next interval.
 - Empty/malformed metric results: handled defensively; predictive policy falls back.
-- No forecast models: optimizer uses safe fallback forecasts from current request rate.
+- No forecast models: forecast = current request rate at confidence 0.0, so the optimizer is reactive only until you run `make train` and restart it.
 - Missing cAdvisor metrics: CPU/memory may be unavailable; loop still runs with fallback behavior.
 
 ## Architecture and assumptions
 
 See:
 
-- `docs/architecture.md`
+- `docs/architecture.md` (diagrams, safety behaviour, data schema)
+- `docs/setup-and-testing.md` (run and test guide)
+- `docs/benchmark.md` (simulation results and caveats)
 - `docs/implementation-roadmap.md`
 
 PromQL queries assume:
