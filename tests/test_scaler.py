@@ -129,3 +129,68 @@ def test_rejects_zero_replicas():
     except ValueError:
         return
     raise AssertionError("expected ValueError")
+
+
+# ---- smoke-test tool ---------------------------------------------------------------------------
+
+
+def test_smoke_test_parses_work_counter_and_ignores_other_paths():
+    from optimizer.scaling.smoke_test import work_count
+
+    text = (
+        '# HELP http_requests_total Total HTTP requests\n'
+        'http_requests_total{method="GET",path="/work",status="200"} 12.0\n'
+        'http_requests_total{method="GET",path="/health",status="200"} 99.0\n'
+        'http_requests_total_created{method="GET",path="/work",status="200"} 1.7e9\n'
+    )
+    assert work_count(text) == 12.0
+
+
+def test_smoke_test_passes_only_when_every_replica_serves_traffic():
+    from optimizer.scaling import smoke_test
+
+    scaler = MagicMock()
+    scaler.get_replica_count.return_value = 2
+    scaler.set_replicas.return_value = True
+    scaler._sorted.side_effect = lambda c: c
+    scaler._running_containers.return_value = [_container(1), _container(2)]
+    scaler._ip_address.side_effect = lambda c: f"10.0.0.{c.labels['com.docker.compose.container-number']}"
+
+    class Resp:
+        status_code = 200
+        text = ""
+
+    served = {"10.0.0.1": 0, "10.0.0.2": 0}
+
+    def fake_get(url, timeout=0):
+        resp = Resp()
+        if url.endswith("/metrics"):
+            ip = url.split("//")[1].split(":")[0]
+            resp.text = f'http_requests_total{{method="GET",path="/work",status="200"}} {served[ip]}\n'
+        else:  # a request via the LB: alternate between the two replicas
+            served["10.0.0.1" if sum(served.values()) % 2 == 0 else "10.0.0.2"] += 1
+        return resp
+
+    lines = []
+    with patch.object(smoke_test.requests, "get", side_effect=fake_get):
+        ok = smoke_test.run(
+            scaler, replicas=2, request_count=10, lb_url="http://lb", port=8000, restore=True,
+            settle_seconds=0, out=lines.append,
+        )
+    assert ok and any("PASS" in line for line in lines)
+    scaler.set_replicas.assert_called_with(2)  # restore to the original count
+
+    served.update({"10.0.0.1": 0, "10.0.0.2": 0})
+    def one_sided(url, timeout=0):
+        resp = Resp()
+        if url.endswith("/metrics"):
+            ip = url.split("//")[1].split(":")[0]  # replica 2 never serves anything
+            resp.text = f'http_requests_total{{method="GET",path="/work",status="200"}} {served[ip]}\n'
+        else:
+            served["10.0.0.1"] += 1
+        return resp
+    with patch.object(smoke_test.requests, "get", side_effect=one_sided):
+        assert not smoke_test.run(
+            scaler, replicas=2, request_count=10, lb_url="http://lb", port=8000, restore=False,
+            settle_seconds=0, out=lambda *_: None,
+        )

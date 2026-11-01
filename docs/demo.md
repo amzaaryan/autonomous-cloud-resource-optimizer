@@ -1,3 +1,5 @@
+> Setup, commands and scenarios: see [setup-and-testing.md](setup-and-testing.md). This file is the presentation walkthrough.
+
 The CPU and memory issue is fixed. The optimizer now reads resource statistics directly from the Docker Engine API, exposes them through Prometheus gauges, and the dashboard displays percentages.
 
 Current verified values:
