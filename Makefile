@@ -1,4 +1,9 @@
-.PHONY: up down test train benchmark calibrate demo-live smoke-scale reset
+.PHONY: demo up down test train benchmark calibrate demo-live smoke-scale reset
+
+# DEMO: one command. Real scaling on, quicker cooldown, traffic + policy controlled from the dashboard.
+demo:
+	docker compose --env-file .env.demo up -d --build
+	@echo "Dashboard (control panel): http://localhost:8501   Locust: http://localhost:8089   Prometheus: http://localhost:9090"
 
 up:
 	docker compose up --build

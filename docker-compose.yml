@@ -116,6 +116,10 @@ services:
       ERROR_RATE_SLA: ${ERROR_RATE_SLA:-0.05}
       TELEMETRY_INTERVAL_SECONDS: ${TELEMETRY_INTERVAL_SECONDS:-15}
       FORECAST_HORIZONS_MINUTES: ${FORECAST_HORIZONS_MINUTES:-1,3,5}
+      AUTO_TRAIN: ${AUTO_TRAIN:-true}
+      AUTO_TRAIN_MIN_ROWS: ${AUTO_TRAIN_MIN_ROWS:-80}
+      AUTO_TRAIN_INTERVAL_MINUTES: ${AUTO_TRAIN_INTERVAL_MINUTES:-10}
+      AUTO_TRAIN_REQUIRE_IMPROVEMENT: ${AUTO_TRAIN_REQUIRE_IMPROVEMENT:-true}
       DRY_RUN: ${DRY_RUN:-true}
       SCALING_MODE: ${SCALING_MODE:-compose}
       MODEL_DIR: ${MODEL_DIR:-data/models}
@@ -151,7 +155,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data   # read telemetry/status, write the control file
       - ./docs/results:/app/docs/results:ro
     depends_on:
       prometheus:
@@ -169,11 +173,14 @@ services:
     container_name: locust
     working_dir: /mnt/locust
     environment:
-      LOCUST_PROFILE: ${LOCUST_PROFILE:-constant}
+      # panel = driven live from the dashboard; or constant / ramp / spike / burst / traffic-drop
+      LOCUST_PROFILE: ${LOCUST_PROFILE:-panel}
+      CONTROL_PATH: /mnt/control/control.json
       LOCUST_WORK_INTENSITY: ${LOCUST_WORK_INTENSITY:-low}
     volumes:
       - ./load_testing:/mnt/locust:ro
-    command: -f /mnt/locust/locustfile.py --host=http://lb
+      - ./data/runtime:/mnt/control:ro
+    command: -f /mnt/locust/locustfile.py --host=http://lb --autostart
     ports:
       - "8089:8089"
     depends_on:

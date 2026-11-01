@@ -43,6 +43,13 @@ class ForecastEngine:
     def from_settings(cls, settings) -> "ForecastEngine":
         return cls(settings.model_dir, settings.forecast_horizons_minutes, settings.telemetry_interval_seconds)
 
+    def reload(self) -> None:
+        """Pick up newly trained models without restarting (used by the auto-trainer)."""
+        fresh = ForecastEngine(self.model_dir, self.horizons, self.interval_seconds)
+        self.feature_order = fresh.feature_order
+        self.target_mode = fresh.target_mode
+        self.models = fresh.models  # assigned last: forecast() only sees a complete set
+
     def _load_metadata(self) -> dict[str, Any]:
         path = self.model_dir / "metadata.json"
         if not path.exists():
@@ -68,7 +75,7 @@ class ForecastEngine:
                     self.interval_seconds,
                 )
                 return
-        else:
+        elif any(self.model_dir.glob("rf_request_rate_h*.joblib")):
             LOGGER.warning("No interval_seconds in model metadata; horizons may be mis-scaled. Retrain recommended.")
 
         self.feature_order = metadata.get("feature_columns")

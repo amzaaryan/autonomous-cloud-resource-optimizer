@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sys
+import time
 
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+
+from optimizer.control import INTENSITIES, MODES, read_control, update_control
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "load_testing"))
+import presets  # noqa: E402
 
 
 st.set_page_config(page_title="Cloud Resource Optimizer", layout="wide")
@@ -17,7 +24,90 @@ st.title("Autonomous Cloud Resource Optimizer")
 PROMETHEUS_URL = st.sidebar.text_input("Prometheus URL", value="http://prometheus:9090")
 TELEMETRY_PATH = st.sidebar.text_input("Telemetry file", value="data/runtime/telemetry_snapshots.jsonl")
 EVENTS_PATH = st.sidebar.text_input("Scaling events file", value="data/runtime/scaling_events.jsonl")
-REFRESH_SECONDS = st.sidebar.slider("Auto refresh (seconds)", min_value=5, max_value=60, value=15)
+REFRESH_SECONDS = st.sidebar.slider("Auto refresh (seconds)", min_value=5, max_value=60, value=10)
+CONTROL_PATH = "data/runtime/control.json"
+MODEL_STATUS_PATH = "data/runtime/model_status.json"
+
+POLICY_MODE_LABELS = {
+    "auto": "Auto (predictive when a model is trained, else reactive)",
+    "reactive": "Reactive only (CPU thresholds)",
+    "predictive": "Predictive (forecast-driven; rate-based until a model is trained)",
+}
+
+
+def render_control_panel() -> None:
+    st.header("Demo control")
+    control = read_control(CONTROL_PATH)
+    traffic = control["traffic"]
+
+    st.markdown("**Traffic generator**: pick what Locust sends to the app")
+    keys = list(presets.PRESETS)
+    columns = st.columns(len(keys))
+    for column, key in zip(columns, keys):
+        preset = presets.PRESETS[key]
+        if column.button(preset.label, key=f"preset_{key}", help=preset.description, width="stretch"):
+            update_control(CONTROL_PATH, preset=key)
+            st.rerun()
+
+    current = presets.PRESETS.get(traffic["preset"], presets.PRESETS[presets.DEFAULT_PRESET])
+    started = traffic["started_at"]
+    running_for = f"{max(0, time.time() - started):.0f}s" if started else "since start"
+    now_target = presets.target(current.key, time.time() - started if started else 0.0)
+    st.info(
+        f"Traffic: **{current.label}** ({current.description}). Running {running_for}. "
+        f"Right now: **{'paused' if now_target.paused else str(now_target.users) + ' users'}**."
+    )
+
+    left, right = st.columns(2)
+    intensity = left.radio(
+        "Work per request",
+        INTENSITIES,
+        index=INTENSITIES.index(traffic["intensity"]),
+        horizontal=True,
+        help="Heavier requests use more CPU per request, so one replica serves fewer requests per second.",
+    )
+    if intensity != traffic["intensity"]:
+        update_control(CONTROL_PATH, intensity=intensity)
+        st.rerun()
+
+    mode = right.radio(
+        "Scaling policy",
+        MODES,
+        index=MODES.index(control["policy_mode"]),
+        format_func=lambda m: POLICY_MODE_LABELS[m],
+        help="Switch live to compare reactive and predictive on the same traffic.",
+    )
+    if mode != control["policy_mode"]:
+        update_control(CONTROL_PATH, policy_mode=mode)
+        st.rerun()
+
+    render_model_status()
+
+
+def render_model_status() -> None:
+    st.markdown("**Forecasting model (retrained automatically in the background)**")
+    try:
+        status = json.loads(Path(MODEL_STATUS_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st.info("Waiting for the optimizer's first training check...")
+        return
+    state = status.get("state")
+    message = status.get("message", "")
+    if state == "deployed":
+        st.success(message)
+    elif state == "collecting":
+        rows, needed = status.get("rows", 0), status.get("min_rows", 0)
+        st.progress(min(1.0, rows / needed) if needed else 0.0, text=message)
+    elif state == "rejected":
+        st.warning(message + ". Scaling stays rate-based / reactive.")
+    else:
+        st.error(message)
+    results = status.get("results")
+    if results:
+        st.dataframe(pd.DataFrame(results), width="stretch")
+
+
+render_control_panel()
 
 
 def read_jsonl(path: str) -> pd.DataFrame:
@@ -93,6 +183,8 @@ def load_events(path: str) -> pd.DataFrame:
         "to_replicas",
         "policy",
         "reason",
+        "policy_mode",
+        "forecast_source",
         "success",
         "dry_run",
     ]
@@ -111,6 +203,13 @@ col3.metric("Memory", "--" if live["memory_usage"] is None else f"{live['memory_
 col4.metric("RPS", "--" if live["request_rate"] is None else f"{live['request_rate']:.3f}")
 col5.metric("p95 latency", "--" if live["p95_latency_ms"] is None else f"{live['p95_latency_ms']:.1f} ms")
 col6.metric("Error rate", "--" if live["error_rate"] is None else f"{live['error_rate']:.3f}")
+
+if not telemetry.empty and "policy_mode" in telemetry.columns:
+    latest_row = telemetry.iloc[-1]
+    st.caption(
+        f"Optimizer is using: policy mode **{latest_row.get('policy_mode')}**, forecast source "
+        f"**{latest_row.get('forecast_source')}**, forecast confidence {latest_row.get('forecast_confidence')}"
+    )
 
 if telemetry.empty:
     st.warning("No telemetry snapshots yet. Start optimizer and generate traffic in Locust.")
@@ -193,4 +292,6 @@ if benchmark_path.exists():
 else:
     st.info("Run `make benchmark` to generate docs/results/benchmark_summary.csv.")
 
-st.caption(f"Refresh this page every {REFRESH_SECONDS}s or use Streamlit auto-rerun during demos.")
+st.caption(f"Auto-refreshing every {REFRESH_SECONDS}s.")
+time.sleep(REFRESH_SECONDS)
+st.rerun()
