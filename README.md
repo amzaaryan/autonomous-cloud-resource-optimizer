@@ -4,7 +4,8 @@ Educational prototype for **predictive container scaling** using Docker Compose,
 
 ## What runs locally
 
-- Target API: `http://localhost:8000` (`/health`, `/work`, `/metrics`)
+- Target API via the nginx load balancer: `http://localhost:8000` (`/health`, `/work`). Replicas are
+  not published on host ports; the load balancer discovers them through Docker DNS.
 - Prometheus: `http://localhost:9090`
 - cAdvisor: `http://localhost:8080` (host support dependent)
 - Optimizer health/metrics: `http://localhost:8001/health`, `http://localhost:8001/metrics`
@@ -45,21 +46,28 @@ GET /work?intensity=medium&iterations=2000000
 
 ## Scaling modes and safety
 
-Default mode is safe local baseline:
+Default is safe: `DRY_RUN=true` only logs what it *would* do. For real scaling run
+`make demo-live` (= `DRY_RUN=false docker compose up --build`).
 
-- `DRY_RUN=true`
-- `SCALING_MODE=compose`
+| Mode | What happens with `DRY_RUN=false` |
+|---|---|
+| `compose` (default) | The optimizer clones the running `target-service` container through the Docker socket: same image, env, CPU/memory limits and network, with the service name as a network alias. The nginx load balancer and Prometheus (`dns_sd_configs`) discover replicas via Docker DNS. A new replica must pass `/health` before it counts. Scale-down detaches the newest replica, drains it, then removes it; the original is never removed. Clones carry the compose labels, so `docker compose down` removes them. |
+| `swarm` | `service.scale(n)` on a Swarm service. |
 
-Behavior implemented:
+Policy behaviour:
 
-- min/max replicas
-- cooldown
-- one-step scaling (`SCALE_STEP`)
-- SLA-safe scale-down checks (latency + error rate)
-- structured scaling event logging (`data/runtime/scaling_events.jsonl`)
-- predictive fallback to reactive when forecast confidence/data is weak
+- **Predictive:** `replicas = ceil(forecast_peak / (RPS_PER_REPLICA_CAPACITY x TARGET_UTILIZATION))`.
+  Scales down only if the forecast would still sit under `SCALE_DOWN_UTILIZATION` with one replica fewer (hysteresis).
+  `PREDICTIVE_MAX_STEP` lets it add several replicas at once (default: one step).
+- **Reactive safety net:** CPU thresholds on *per-replica* utilisation (aggregate cores / (replicas x limit)).
+  A reactive scale-down is vetoed when a confident forecast says current capacity is needed.
+- min/max replicas, cooldown, SLA-safe scale-down (missing p95 with no traffic is not treated as a breach),
+  structured events in `data/runtime/scaling_events.jsonl`, fallback to reactive when the forecast is weak.
 
-> Docker Compose is not a production scheduler. Real in-place scaling is supported only with `SCALING_MODE=swarm` and `DRY_RUN=false`.
+**Calibrate before demoing:** `RPS_PER_REPLICA_CAPACITY` is a measured number, not a constant.
+Run `make calibrate` against one replica and put the result in `.env`.
+
+> Status: the Docker scaling path is covered by mock-based unit tests. It has not been run against a live daemon in the environment this was written in, so do one dry rehearsal of `make demo-live` before the evaluation.
 
 ## Telemetry + runtime data schema
 
@@ -85,7 +93,10 @@ And scaling events:
 
 ## Forecasting workflow
 
-Train Random Forest models (chronological split, horizons 1/3/5 min):
+Train Random Forest models (horizons 1/3/5 **minutes**, converted to rows from the sampling interval).
+The target is the *change* in request rate over the horizon (`--target-mode delta`, default) or the
+absolute rate (`--target-mode absolute`). Models record the interval they were trained at, and the optimizer
+ignores models trained at a different sampling interval.
 
 ```bash
 python -m optimizer.forecasting.train \
@@ -101,6 +112,16 @@ Outputs:
 - `data/processed/model_evaluation.csv` (MAE, RMSE, MAPE, R2, spike precision/recall)
 
 Model artifacts/runtime data are gitignored.
+
+## Reactive vs predictive benchmark
+
+```bash
+make benchmark     # simulation, no Docker needed
+```
+
+Writes `docs/results/*.csv` and plots to `docs/images/`. Results and honest caveats: [`docs/benchmark.md`](docs/benchmark.md).
+Headline: on repeating bursts, predictive sizing cuts SLA-violation time ~3.3x versus reactive; the Random Forest
+itself does not beat a "current rate" forecast on unseen traffic shapes.
 
 ## Dashboard capabilities
 
@@ -119,7 +140,10 @@ Dashboard gracefully degrades when Prometheus/files are unavailable.
 ```bash
 make test
 make train
+make benchmark
+make calibrate
 make up
+make demo-live   # real scaling
 make down
 ```
 
@@ -131,7 +155,10 @@ Unit tests cover:
 - feature engineering
 - persistence baseline + evaluation metrics
 - reactive/predictive policy decisions
-- Docker scaler safety behavior (mocked)
+- Docker scaler: scale up/down, readiness failure, never removing the original, dry-run (mocked)
+- capacity-based predictive policy, hysteresis, combined policy veto
+- minute-based horizons, NaN/None telemetry handling, per-replica CPU, forecast engine and training
+- benchmark determinism and calibration helper
 - cost calculations
 - FastAPI smoke tests
 

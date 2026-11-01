@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from typing import Any
 
 import requests
@@ -82,9 +83,12 @@ class PrometheusClient:
             return None
 
         try:
-            return float(raw[1])
+            value = float(raw[1])
         except (TypeError, ValueError):
             return None
+        # Prometheus returns the literal strings "NaN" / "+Inf" for undefined results
+        # (e.g. histogram_quantile with zero traffic). Treat them as "no data".
+        return value if math.isfinite(value) else None
 
     @staticmethod
     def parse_range_values(payload: dict[str, Any]) -> list[tuple[float, float]]:
@@ -103,9 +107,11 @@ class PrometheusClient:
             if not isinstance(sample, list) or len(sample) != 2:
                 continue
             try:
-                parsed.append((float(sample[0]), float(sample[1])))
+                ts, value = float(sample[0]), float(sample[1])
             except (TypeError, ValueError):
                 continue
+            if math.isfinite(ts) and math.isfinite(value):
+                parsed.append((ts, value))
         return parsed
 
     def _safe_query_value(self, promql: str) -> float | None:
@@ -115,29 +121,36 @@ class PrometheusClient:
             return None
         return self.parse_instant_value(payload)
 
+    def _service_selector(self) -> str:
+        return f'{{container_label_com_docker_compose_service="{self.service_name}"}}'
+
     def get_cpu_usage(self) -> float | None:
-        labeled = (
-            "sum(rate(container_cpu_usage_seconds_total"
-            f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}}[1m]))"
-        )
-        value = self._safe_query_value(labeled)
-        if value is not None:
-            return value
-        fallback = "sum(rate(container_cpu_usage_seconds_total{job=\"cadvisor\",id!=\"/\",id!~\"/docker.*|/system.slice.*|/user.slice.*\"}[1m]))"
-        return self._safe_query_value(fallback)
+        """Aggregate CPU of the service in CORES (sum over all replicas).
+
+        Returns None when cAdvisor has no per-service data. The optimizer then falls back to
+        `docker stats` for the same service. There is deliberately no host-wide fallback: a
+        number that includes Prometheus, cAdvisor and Locust must not drive scaling.
+        """
+        selector = self._service_selector()
+        return self._safe_query_value(f"sum(rate(container_cpu_usage_seconds_total{selector}[1m]))")
 
     def get_memory_usage(self) -> float | None:
-        labeled = (
-            "sum(container_memory_usage_bytes"
-            f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}})"
-            " / clamp_min(sum(container_spec_memory_limit_bytes"
-            f"{{container_label_com_docker_compose_service=\"{self.service_name}\"}}), 1)"
+        """Aggregate memory used / aggregate memory limit for the service's replicas.
+
+        Containers without a limit report 0 (cgroup v2) or ~9.2e18 (cgroup v1) for
+        `container_spec_memory_limit_bytes`; dividing by that gave nonsense ratios, so only
+        real limits are used. Without any limit the ratio falls back to share of host memory.
+        """
+        selector = self._service_selector()
+        limited = (
+            f"sum(container_memory_usage_bytes{selector}) / "
+            f"sum((container_spec_memory_limit_bytes{selector} > 0) < 1e15)"
         )
-        value = self._safe_query_value(labeled)
+        value = self._safe_query_value(limited)
         if value is not None:
             return value
-        fallback = "sum(container_memory_usage_bytes{job=\"cadvisor\",id!=\"/\",id!~\"/docker.*|/system.slice.*|/user.slice.*\"}) / scalar(sum(machine_memory_bytes))"
-        return self._safe_query_value(fallback)
+        host_share = f"sum(container_memory_usage_bytes{selector}) / scalar(sum(machine_memory_bytes))"
+        return self._safe_query_value(host_share)
 
     def get_request_rate(self) -> float | None:
         promql = 'sum(rate(http_requests_total{path="/work"}[1m]))'
@@ -151,14 +164,17 @@ class PrometheusClient:
         return self._safe_query_value(promql)
 
     def get_error_rate(self) -> float | None:
+        # `sum()` over zero matching series is an EMPTY vector, not 0. The target service
+        # only creates a 5xx series once an error happens, so without `or vector(0)` this
+        # query returned no data on every healthy system.
         promql = (
-            'sum(rate(http_requests_total{status=~"5.."}[5m])) '
+            '(sum(rate(http_requests_total{status=~"5.."}[5m])) or vector(0)) '
             '/ clamp_min(sum(rate(http_requests_total[5m])), 1)'
         )
         return self._safe_query_value(promql)
 
     def get_replica_count(self) -> int | None:
-        promql = f'count(up{{job="target-service"}} == 1)'
+        promql = f'count(up{{job="{self.service_name}"}} == 1)'
         value = self._safe_query_value(promql)
         return int(value) if value is not None else None
 

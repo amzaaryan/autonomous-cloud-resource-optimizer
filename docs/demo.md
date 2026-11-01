@@ -119,7 +119,7 @@ Expected observations:
 - Forecast values increase.
 - The optimizer policy may change.
 - Scaling events may appear in the event table.
-- Since `DRY_RUN=true`, scaling is simulated and does not actually create replicas.
+- Since `DRY_RUN=true`, scaling is simulated and does not actually create replicas. Use `make demo-live` (`DRY_RUN=false`) to see real replicas appear (`docker ps`).
 
 For a shorter evaluator demonstration, temporarily change the spike profile timings in `load_testing/locustfile.py`, for example:
 

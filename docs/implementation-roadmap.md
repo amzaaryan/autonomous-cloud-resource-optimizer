@@ -43,3 +43,13 @@
 - [x] Display forecast trends and scaling event history.
 - [x] Show policy/health state and estimated cost/savings.
 - [x] Display predictive experiment report table when available.
+
+## Milestone 7: Autonomous scaling execution (CE2)
+
+- [x] Real compose scaling through the Docker SDK (clone, readiness, drain, remove) behind `DRY_RUN`.
+- [x] nginx load balancer + DNS service discovery so replicas receive traffic and are scraped.
+- [x] Capacity-based predictive policy with hysteresis and reactive veto; per-replica CPU.
+- [x] Forecaster fixes: trainable on idle/None telemetry; horizons in minutes; delta target; interval check.
+- [x] Reactive-vs-predictive benchmark (`docs/benchmark.md`) and capacity calibration (`make calibrate`).
+- [ ] Rehearse `make demo-live` against a live Docker daemon and record the real replica timeline.
+- [ ] Evaluate the forecaster in-distribution on real captured telemetry.
