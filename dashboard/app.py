@@ -45,10 +45,18 @@ def prom_query(promql: str) -> float | None:
         return None
 
 
+def first_present(*values: float | None) -> float | None:
+    """First value that is not None. (`a or b` would wrongly discard a real 0.0 reading.)"""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def get_live_metrics() -> dict[str, float | None]:
     return {
-        "cpu_usage": prom_query('optimizer_target_cpu_usage') or prom_query('sum(rate(container_cpu_usage_seconds_total{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}[1m]))'),
-        "memory_usage": prom_query('optimizer_target_memory_usage') or prom_query('sum(container_memory_usage_bytes{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}) / scalar(sum(machine_memory_bytes))'),
+        "cpu_usage": first_present(prom_query('optimizer_target_cpu_usage'), prom_query('sum(rate(container_cpu_usage_seconds_total{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}[1m]))')),
+        "memory_usage": first_present(prom_query('optimizer_target_memory_usage'), prom_query('sum(container_memory_usage_bytes{job="cadvisor",id!="/",id!~"/docker.*|/system.slice.*|/user.slice.*"}) / scalar(sum(machine_memory_bytes))')),
         "request_rate": prom_query('sum(rate(http_requests_total{path="/work"}[1m]))'),
         "p95_latency_ms": prom_query('histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{path="/work"}[5m]))) * 1000'),
         "error_rate": prom_query('sum(rate(http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1)'),
@@ -164,5 +172,25 @@ if comparison_path.exists():
     st.dataframe(comparison, width="stretch")
 else:
     st.info("Run model training to generate predictive evaluation comparison (data/processed/model_evaluation.csv).")
+
+st.subheader("Reactive vs predictive benchmark (simulation)")
+benchmark_path = Path("docs/results/benchmark_summary.csv")
+if benchmark_path.exists():
+    bench = pd.read_csv(benchmark_path)
+    shown = bench[
+        ["profile", "policy", "sla_violation_seconds_mean", "requests_over_sla_pct_mean", "avg_replicas_mean", "est_cost_mean"]
+    ].rename(
+        columns={
+            "sla_violation_seconds_mean": "SLA-violation seconds",
+            "requests_over_sla_pct_mean": "% requests over SLA",
+            "avg_replicas_mean": "avg replicas",
+            "est_cost_mean": "est. cost",
+        }
+    )
+    profile = st.selectbox("Traffic profile", list(shown["profile"].unique()))
+    st.dataframe(shown[shown["profile"] == profile].drop(columns="profile"), width="stretch")
+    st.caption("Closed-loop simulation of the same policy code; see docs/benchmark.md for assumptions.")
+else:
+    st.info("Run `make benchmark` to generate docs/results/benchmark_summary.csv.")
 
 st.caption(f"Refresh this page every {REFRESH_SECONDS}s or use Streamlit auto-rerun during demos.")

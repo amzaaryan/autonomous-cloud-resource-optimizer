@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
 from pathlib import Path
@@ -13,33 +14,32 @@ import threading
 import time
 from typing import Any
 
-import pandas as pd
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
-from sklearn.exceptions import NotFittedError
 
-from optimizer.analytics import update_cost_totals
+from optimizer.analytics import per_replica_cpu, update_cost_totals
 from optimizer.config import Settings
-from optimizer.feature_engineering import build_features, feature_columns
-from optimizer.forecasting.models import load_model
-from optimizer.policy.policies import PolicyConfig, PolicyInput, predictive_decision, reactive_decision
+from optimizer.forecasting.engine import ForecastEngine
+from optimizer.policy.combined import combined_decision
+from optimizer.policy.policies import PolicyConfig, PolicyInput
 from optimizer.prometheus_client import PrometheusClient, PrometheusQueryError, TelemetrySnapshot
 from optimizer.scaling.docker_scaler import DockerScaler
-
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 LOGGER = logging.getLogger(__name__)
 
 LOOP_SUCCESS = Counter("optimizer_loop_success_total", "Successful optimizer loops")
 LOOP_FAILURE = Counter("optimizer_loop_failure_total", "Failed optimizer loops")
-SCALING_ACTIONS = Counter("optimizer_scaling_actions_total", "Scaling actions", ["action", "policy"]) 
+SCALING_ACTIONS = Counter("optimizer_scaling_actions_total", "Scaling actions", ["action", "policy"])
 FORECAST_GAUGE = Gauge("optimizer_forecast_rps", "Forecasted request rate", ["horizon_minute"])
 POLICY_STATE = Gauge("optimizer_policy_state", "1 predictive, 0 reactive")
 ESTIMATED_COST = Gauge("optimizer_estimated_cost_total", "Estimated cumulative cost")
 ESTIMATED_SAVINGS = Gauge("optimizer_estimated_savings_total", "Estimated cumulative savings")
 CURRENT_REPLICAS = Gauge("optimizer_current_replicas", "Current known replica count")
-RESOURCE_CPU = Gauge("optimizer_target_cpu_usage", "Aggregate target-service CPU usage ratio")
-RESOURCE_MEMORY = Gauge("optimizer_target_memory_usage", "Aggregate target-service memory usage ratio")
+RESOURCE_CPU = Gauge(
+    "optimizer_target_cpu_usage",
+    "Per-replica CPU utilisation of target-service: aggregate cores / (replicas * per-replica CPU limit)",
+)
+RESOURCE_MEMORY = Gauge("optimizer_target_memory_usage", "Aggregate target-service memory used / memory limit")
 
 
 class RuntimeStatus:
@@ -99,56 +99,6 @@ class OptimizerHttpHandler(BaseHTTPRequestHandler):
         return
 
 
-class ForecastEngine:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self.models: dict[int, Any] = {}
-        self._load_models()
-
-    def _load_models(self) -> None:
-        model_dir = Path(self.settings.model_dir)
-        for horizon in self.settings.forecast_horizons_minutes:
-            path = model_dir / f"rf_request_rate_h{horizon}.joblib"
-            if path.exists():
-                try:
-                    self.models[horizon] = load_model(path)
-                except Exception:  # noqa: BLE001
-                    LOGGER.exception("Failed loading model %s", path)
-
-    def forecast(self, history: list[dict[str, Any]]) -> tuple[dict[int, float], float | None]:
-        if not history:
-            return {}, None
-
-        current_rps = history[-1].get("request_rate")
-        if current_rps is None:
-            return {}, None
-
-        frame = pd.DataFrame(history)
-        engineered = build_features(frame, with_targets=False)
-        if engineered.empty:
-            return {h: float(current_rps) for h in self.settings.forecast_horizons_minutes}, 0.5
-
-        latest = engineered.tail(1)
-        cols = feature_columns(latest)
-
-        result: dict[int, float] = {}
-        model_predictions = 0
-        for horizon in self.settings.forecast_horizons_minutes:
-            model = self.models.get(horizon)
-            if model is not None:
-                try:
-                    prediction = float(model.predict(latest[cols])[0])
-                    result[horizon] = max(0.0, prediction)
-                    model_predictions += 1
-                    continue
-                except (ValueError, NotFittedError):
-                    LOGGER.warning("Model inference failed for horizon %s", horizon)
-            result[horizon] = float(current_rps)
-
-        confidence = model_predictions / max(1, len(self.settings.forecast_horizons_minutes))
-        return result, confidence
-
-
 def ensure_parent(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -178,6 +128,7 @@ def build_policy_config(settings: Settings) -> PolicyConfig:
         memory_scale_up_threshold=settings.memory_scale_up_threshold,
         latency_sla_ms=settings.latency_sla_ms,
         error_rate_sla=settings.error_rate_sla,
+        predictive_max_step=settings.predictive_max_step,
     )
 
 
@@ -196,8 +147,16 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop_handler)
 
     telemetry_client = PrometheusClient(settings.prometheus_url, service_name=settings.target_service_name)
-    scaler = DockerScaler(settings.target_service_name, dry_run=settings.dry_run, mode=settings.scaling_mode)
-    forecaster = ForecastEngine(settings)
+    scaler = DockerScaler(
+        settings.target_service_name,
+        dry_run=settings.dry_run,
+        mode=settings.scaling_mode,
+        port=settings.target_service_port,
+        health_path=settings.target_health_path,
+        ready_timeout_seconds=settings.replica_ready_timeout_seconds,
+        drain_seconds=settings.scale_down_drain_seconds,
+    )
+    forecaster = ForecastEngine.from_settings(settings)
     policy_config = build_policy_config(settings)
 
     history: deque[dict[str, Any]] = deque(maxlen=512)
@@ -206,7 +165,13 @@ def main() -> None:
     cumulative_cost = 0.0
     cumulative_savings = 0.0
 
-    LOGGER.info("Optimizer started. dry_run=%s scaling_mode=%s", settings.dry_run, settings.scaling_mode)
+    LOGGER.info(
+        "Optimizer started. dry_run=%s scaling_mode=%s models_loaded=%s capacity=%.1f rps/replica",
+        settings.dry_run,
+        settings.scaling_mode,
+        sorted(forecaster.models),
+        settings.rps_per_replica_capacity,
+    )
 
     try:
         while not stop_event.is_set():
@@ -220,17 +185,24 @@ def main() -> None:
                 replicas = data.get("replica_count")
                 if replicas is None:
                     replicas = scaler.get_replica_count()
-                    data["replica_count"] = replicas
-                CURRENT_REPLICAS.set(float(replicas))
-                cpu_usage, memory_usage = scaler.get_resource_usage()
-                if data.get("cpu_usage") is None:
-                    data["cpu_usage"] = cpu_usage
-                if data.get("memory_usage") is None:
-                    data["memory_usage"] = memory_usage
-                if data.get("cpu_usage") is not None:
+                data["replica_count"] = replicas
+                current_replicas = int(replicas)
+                CURRENT_REPLICAS.set(float(current_replicas))
+
+                # Prometheus/cAdvisor first; `docker stats` only when it has nothing for the service.
+                cores = data.get("cpu_usage")
+                memory = data.get("memory_usage")
+                if cores is None or memory is None:
+                    docker_cores, docker_memory = scaler.get_resource_usage()
+                    cores = docker_cores if cores is None else cores
+                    memory = docker_memory if memory is None else memory
+                data["cpu_cores"] = cores
+                data["cpu_usage"] = per_replica_cpu(cores, current_replicas, settings.replica_cpu_limit_cores)
+                data["memory_usage"] = memory
+                if data["cpu_usage"] is not None:
                     RESOURCE_CPU.set(float(data["cpu_usage"]))
-                if data.get("memory_usage") is not None:
-                    RESOURCE_MEMORY.set(float(data["memory_usage"]))
+                if memory is not None:
+                    RESOURCE_MEMORY.set(float(memory))
 
                 forecasts, confidence = forecaster.forecast(list(history) + [data])
                 for horizon, value in forecasts.items():
@@ -240,7 +212,6 @@ def main() -> None:
                 elapsed_minutes = max(0.0, (now_tick - last_tick) / 60.0)
                 last_tick = now_tick
 
-                current_replicas = int(replicas)
                 baseline_replicas = max(settings.savings_baseline_replicas, settings.min_replicas)
                 cumulative_cost, cumulative_savings = update_cost_totals(
                     cumulative_cost=cumulative_cost,
@@ -267,27 +238,18 @@ def main() -> None:
                     current_replicas=current_replicas,
                     predicted_request_rate=forecasts,
                 )
-
-                predictive = predictive_decision(
+                decision = combined_decision(
                     policy_input,
                     policy_config,
                     now=loop_time,
                     last_scaled_at=last_scaled_at,
                     forecast_confidence=confidence,
-                    high_load_rps_threshold=3.0,
-                    low_load_rps_threshold=0.8,
+                    capacity_rps_per_replica=settings.rps_per_replica_capacity,
+                    target_utilization=settings.target_utilization,
+                    scale_down_utilization=settings.scale_down_utilization,
                 )
-
-                if predictive.action == "no_action":
-                    decision = reactive_decision(policy_input, policy_config, now=loop_time, last_scaled_at=last_scaled_at)
-                    status_policy = "reactive"
-                    POLICY_STATE.set(0)
-                else:
-                    decision = predictive
-                    status_policy = "predictive"
-                    POLICY_STATE.set(1)
-
-                status.update(loop_at=loop_iso, error=None, policy=status_policy)
+                POLICY_STATE.set(1 if decision.policy == "predictive" else 0)
+                status.update(loop_at=loop_iso, error=None, policy=decision.policy)
 
                 if decision.action in {"scale_up", "scale_down"} and decision.desired_replicas != current_replicas:
                     scaled = scaler.set_replicas(decision.desired_replicas)
