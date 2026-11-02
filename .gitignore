@@ -14,6 +14,10 @@ htmlcov/
 /data/runtime/*
 /data/models/*
 !/data/**/.gitkeep
+# The compact demo forecaster is checked in so a fresh clone can run predictive mode.
+!/data/models/metadata.json
+!/data/models/rf_request_rate_h*.joblib
+!/data/processed/model_evaluation.csv
 
 # IDE
 .vscode/

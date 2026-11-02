@@ -180,7 +180,7 @@ services:
     volumes:
       - ./load_testing:/mnt/locust:ro
       - ./data/runtime:/mnt/control:ro
-    command: -f /mnt/locust/locustfile.py --host=http://lb --autostart
+    command: -f /mnt/locust/locustfile.py --host=http://lb --web-host=0.0.0.0 --autostart
     ports:
       - "8089:8089"
     depends_on:

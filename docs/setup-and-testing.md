@@ -18,7 +18,10 @@ The stack needs no manual traffic setup or training any more. On the demo machin
    The "Forecasting model" box turns green when a model is deployed, or amber if the forest did not beat the baseline
    (then predictive mode keeps working with the rate-based forecast; say so honestly).
 4. Rehearse: **Demo script**, flip **Reactive only** / **Predictive** between runs, watch replicas (`docker ps`) and the events table.
-5. Optional, so a fresh machine starts with a model: `git add -f data/models/*` and commit it.
+5. The repository includes compact demo model artifacts under `data/models/`, trained from varied
+   constant, ramp, spike, burst, and traffic-drop traces. They let a fresh clone start with a
+   forecaster; they are not proof that the forest beats the current-rate baseline on live traffic.
+   Check `data/processed/model_evaluation.csv` and retrain with your own telemetry when available.
 
 **On the day:** `docker compose --env-file .env.demo up -d` (or `make demo`), open the dashboard, pick a traffic button.
 Stop with `docker compose down`. Telemetry and models persist in `./data` between runs.
