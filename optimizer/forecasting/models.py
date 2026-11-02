@@ -12,7 +12,15 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 def train_random_forest(X, y, output_path: str | Path):
     """Train and persist the initial forecasting model."""
-    model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    # Keep artifacts small enough to ship with a demo checkout while retaining
+    # enough trees and depth for the telemetry features to generalize.
+    model = RandomForestRegressor(
+        n_estimators=64,
+        max_depth=16,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=-1,
+    )
     model.fit(X, y)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
